@@ -1,0 +1,56 @@
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Android Studio and IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Gradle and Kotlin caches
+.gradle/
+.kotlin/
+build/
+
+# Local machine configuration
+local.properties
+
+# Android build and profiling output
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.apks
+output-metadata.json
+*.hprof
+*.log
+
+# Signing keys and local secrets
+*.jks
+*.keystore
+keystore.properties
+secrets.properties
+google-services.json
+.env
+.env.*
+!.env.example
+
+# Large local AI model files and interrupted downloads
+*.litertlm
+*.tflite
+*.task
+*.part
+
+# Temporary files
+.tmp/
+*.tmp
+*.swp
+*~
+
+# Episode starter project is local-only; keep its specification in Git
+/2-can-you-run-gemma-4-directly-on-android/starter-project/**
+!/2-can-you-run-gemma-4-directly-on-android/starter-project/specs/
+!/2-can-you-run-gemma-4-directly-on-android/starter-project/specs/**
