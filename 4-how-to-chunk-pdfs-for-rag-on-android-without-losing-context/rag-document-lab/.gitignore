@@ -1,0 +1,8 @@
+*.iml
+.gradle
+.kotlin
+/local.properties
+/.idea
+/build
+/app/build
+/app/src/main/assets/embedding_gemma.task
