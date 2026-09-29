@@ -26,7 +26,11 @@ jobs:
           java-version: '25'
       - uses: android-actions/setup-android@v4
       - name: Install Android platform
-        run: sdkmanager "platforms;android-37" "build-tools;37.0.0"
+        run: |
+          sdkmanager "platforms;android-37.0" "build-tools;37.0.0"
+          if [ ! -e "$ANDROID_HOME/platforms/android-37" ]; then
+            ln -s android-37.0 "$ANDROID_HOME/platforms/android-37"
+          fi
       - uses: gradle/actions/setup-gradle@v4
       - name: Test and compile
         run: ./gradlew testDebugUnitTest assembleDebug
