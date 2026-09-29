@@ -1,0 +1,32 @@
+name: Episode 5 Android build
+
+on:
+  push:
+    branches:
+      - episode-05-hybrid-search
+  pull_request:
+    paths:
+      - '5-build-hybrid-search-for-rag-on-android-with-bm25/**'
+      - '.github/workflows/episode-05-build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 5-build-hybrid-search-for-rag-on-android-with-bm25/rag-document-lab
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: android-actions/setup-android@v4
+      - name: Install Android platform
+        run: sdkmanager "platforms;android-37" "build-tools;37.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Test and compile
+        run: ./gradlew testDebugUnitTest assembleDebug
