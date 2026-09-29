@@ -88,7 +88,7 @@ fun SearchScreen(
                             singleLine = true,
                             enabled = !state.searching,
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                            keyboardActions = KeyboardActions(onSearch = onSearch),
+                            keyboardActions = KeyboardActions(onSearch = { onSearch() }),
                             modifier = Modifier.fillMaxWidth()
                         )
                         Button(
