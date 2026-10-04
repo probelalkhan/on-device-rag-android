@@ -1,0 +1,312 @@
+# RAG Document Lab engineering specification
+
+## 1. Contract
+
+- Application ID: `dev.belalkhan.ragdocumentlab`
+- Product: RAG Document Lab
+
+`MUST` and `MUST NOT` are normative. A change is complete when every applicable acceptance criterion passes.
+
+The app turns a local, text-based PDF into persistent data and retrieves its saved evidence on device:
+
+```text
+PDF -> text extraction -> overlapping chunks -> EmbeddingGemma -> Room
+question -> EmbeddingGemma query vector + BM25 -> RRF -> saved passages -> bounded context -> local Gemma
+```
+
+Google EmbeddingGemma MUST create every chunk vector. Processing is local and MUST NOT require a network connection.
+
+In scope: single PDF import, progress, errors, persistence, document listing, saved embedding inspection, replacement by display name, and per-document semantic/BM25/hybrid retrieval.
+
+Out of scope: OCR, generation, chat, batch import, deletion, cloud, accounts, background work, and instrumented tests.
+
+## 2. User-visible behavior
+
+### FR-1: Initial state
+
+The app MUST show `RAG Document Lab`, one `Add a PDF` primary action, and documents ordered by `indexedAt` descending. An empty database MUST show an empty state.
+
+### FR-2: PDF selection
+
+`Add a PDF` MUST open the system document picker with MIME type `application/pdf`. Cancelling MUST leave state and storage unchanged.
+
+### FR-3: Import lifecycle
+
+For a selected URI, the app MUST execute these stages in order:
+
+1. Extract PDF text.
+2. Create chunks.
+3. Load EmbeddingGemma if it is not already loaded.
+4. Embed every chunk sequentially.
+5. Persist the complete import in one Room transaction.
+
+Only one import may run at a time. While it runs, the primary action MUST be disabled and progress MUST identify the active stage. Embedding progress MUST include the current chunk number and total chunk count.
+
+### FR-4: Success
+
+After success, the list MUST show the document name, chunk count, and indexed date. Progress MUST become `Document indexed and stored locally`, and the primary action MUST be enabled.
+
+### FR-5: Failure
+
+- A failed import MUST leave stored data unchanged.
+- `CancellationException` MUST be rethrown.
+- The UI MUST show a non-blank exception message, otherwise `Could not process this PDF`.
+- Dismissing an error MUST clear only the error.
+- After failure, progress MUST be `Ready to try another PDF` and the primary action MUST be enabled.
+
+### FR-6: Saved embedding inspection
+
+1. Tapping an indexed document MUST open its saved embeddings screen.
+2. The screen MUST show the document name, chunk count, and vector dimension count.
+3. Every chunk MUST be selectable in `chunkIndex` order.
+4. The selected chunk MUST show its complete stored text and all stored float values with zero-based dimension indexes.
+5. Values MUST use the stored `Float` representation without rounding.
+6. Opening this screen MUST read Room data and MUST NOT run EmbeddingGemma.
+7. Back MUST return to the document list.
+
+### FR-7: Context Lab
+
+1. Each saved document MUST offer `Context Lab` and `Saved embeddings` actions.
+2. `PREPARE CONTEXT` MUST run only for a submitted non-blank question, not on each keystroke. It MUST run hybrid retrieval and build one inspectable request.
+3. Query inference MUST use EmbeddingGemma's `RETRIEVAL_QUERY` role and the stored document embeddings MUST NOT be regenerated.
+4. The feature MUST show four horizontally paged steps: Question, Retrieve, Build Context, and Model Input. Swiping and accessible Previous/Next controls MUST work. The pager has fixed available height and each page scrolls vertically. No comparison tabs or ranking dashboard are added.
+5. Context preparation MUST use the complete hybrid ranking for the selected document. Retrieval and construction MUST run off the main thread.
+6. Back MUST return to the document list. PDF import and saved embedding inspection MUST remain available.
+
+## 3. Processing contracts
+
+### ENG-1: PDF extraction
+
+Contract: document-picker `Uri` -> `ExtractedPdf(name: String, text: String)`.
+
+The extractor MUST:
+
+1. Read the name from `OpenableColumns.DISPLAY_NAME`, falling back to `document.pdf`.
+2. Open the URI through `ContentResolver` and load it with PDFBox Android.
+3. Extract text with `PDFTextStripper`.
+4. Close the input stream and PDF document for both success and failure.
+5. Normalize `\r\n` and `\r` to `\n`.
+6. Replace form-feed page separators with `\n\n`.
+7. Collapse consecutive spaces or tabs to one space.
+8. Remove horizontal whitespace adjacent to a newline.
+9. Collapse three or more newlines to two.
+10. Trim the result.
+
+A blank result MUST fail with `No selectable text was found. Scanned PDFs need OCR.`
+
+### ENG-2: Chunking
+
+Constants:
+
+| Name | Value |
+| --- | ---: |
+| Maximum chunk length | 800 characters |
+| Overlap | 120 characters |
+
+Given normalized text, the chunker MUST:
+
+1. Return an empty list for blank input.
+2. Begin the first candidate at offset `0`.
+3. Set `candidateEnd` to `min(start + 800, text.length)`.
+4. When `candidateEnd` is not the document end, search backward from it for a boundary at or after the candidate midpoint.
+5. Search boundary types in this priority: `\n\n`, `. `, `? `, `! `, `\n`.
+6. Select the last match of the first boundary type that has a valid match. Otherwise select `candidateEnd`.
+7. Trim the selected substring and emit it when non-blank.
+8. Assign zero-based indexes in emitted order.
+9. Set the next start to `end - 120`.
+10. If the next start is inside a word, move it forward to the next space before `end`.
+11. Stop after reaching `text.length`.
+
+Chunk text MUST retain the overlap. Character-based chunking MUST NOT be replaced by token-based chunking without changing this specification.
+
+### ENG-3: EmbeddingGemma model
+
+| Property | Required value |
+| --- | --- |
+| Model | Google EmbeddingGemma MediaPipe task bundle |
+| Runtime | MediaPipe Tasks Text `TextEmbedder` |
+| Asset path | `app/src/main/assets/embedding_gemma.task` |
+| Output | Unquantized `FloatArray`, 768 values |
+
+1. Every chunk MUST be embedded with this EmbeddingGemma model. No substitute model is permitted.
+2. Document input MUST use task type `RETRIEVAL_DOCUMENT`, role `DOCUMENT`, and title `none`.
+3. Returned vectors MUST be copied before storage.
+4. Model creation MUST be lazy, occur off the main thread, and run only when an import reaches embedding.
+5. Chunk inference MUST be sequential and off the main thread.
+6. The engine MUST release MediaPipe resources when the ViewModel is cleared.
+7. The model asset MUST remain excluded from Git and uncompressed in the APK.
+
+### ENG-4: Persistence
+
+Database name: `rag-documents.db`. Schema version: `1`.
+
+`documents` contract:
+
+| Field | Type | Constraint |
+| --- | --- | --- |
+| `id` | Long | Auto-generated primary key |
+| `name` | String | Unique |
+| `chunkCount` | Int | Equals persisted chunk rows |
+| `indexedAt` | Long | Unix epoch milliseconds |
+
+`chunks` contract:
+
+| Field | Type | Constraint |
+| --- | --- | --- |
+| `id` | Long | Auto-generated primary key |
+| `documentId` | Long | Foreign key to `documents.id`, cascade delete |
+| `chunkIndex` | Int | Zero-based document order |
+| `text` | String | Exact emitted chunk text |
+| `embedding` | FloatArray | SQLite BLOB |
+
+Float arrays MUST be encoded and decoded with little-endian byte order using exactly four bytes per float.
+
+All embeddings MUST exist before persistence begins. Within one Room transaction, persistence MUST:
+
+1. Find a document with the same display name.
+2. Delete that document and its cascaded chunks when found.
+3. Insert the new document.
+4. Insert all chunks with the new document ID.
+
+Reading a document's chunks MUST order them by `chunkIndex`.
+
+## 4. Architecture boundaries
+
+Dependency direction:
+
+```text
+Activity -> Compose screen -> ViewModel -> Repository
+Repository -> PDF extractor, chunker, embedding engine, Room DAO
+Repository -> hybrid search engine (cosine, BM25, RRF)
+```
+
+- The Activity owns the picker launcher.
+- The Compose screen renders immutable state and emits callbacks. It MUST NOT access Room, PDFs, MediaPipe, or coroutine scopes.
+- The ViewModel owns immutable UI state, concurrency control, and the import coroutine.
+- The Repository owns pipeline order, dispatcher selection, and transaction initiation.
+- Each Section 3 component owns only its named contract.
+- Hilt MUST provide application-scoped infrastructure and construct the ViewModel.
+- Unspecified layers, interfaces, modules, and screens MUST NOT be added.
+- `SearchScreen` only renders `SearchUiState` and emits callbacks. The ViewModel owns its request and selected mode.
+- The repository reads saved chunks, embeds the query once, then ranks on a worker dispatcher. The search engine is pure Kotlin and has no Android UI or model dependency.
+
+## 5. UI design contract
+
+### Visual system
+
+Use Compose Material 3 with a light color scheme and Manrope. Shape radii MUST be 10 dp, 16 dp, and 24 dp for small, medium, and large roles.
+
+| Role | Value |
+| --- | --- |
+| Background / surface | `#F7F7FA` / `#FFFFFF` |
+| Primary / container | `#4355C5` / `#E2E6FF` |
+| Secondary / container | `#006B5D` / `#9CF2DD` |
+| Primary / secondary text | `#1B1B20` / `#62636C` |
+| Hero gradient | `#26358D` to `#4355C5` |
+
+| Role | Size / line height | Weight |
+| --- | --- | --- |
+| Hero | 34 sp / 40 sp | 700 |
+| Section | 20 sp / 28 sp | 700 |
+| Card title | 16 sp / 22 sp | 700 |
+| Body | 14 sp / 22 sp | 400 |
+| Caption | 12 sp / 18 sp | 400 |
+| Label | 12 sp / 18 sp | 700 |
+
+### Composition
+
+Use edge-to-edge screens with safe drawing insets. White rounded cards sit on the neutral background. Primary containers identify pipeline icons and PDF icons. Secondary color identifies privacy and successful indexing. The home screen hero uses white content over the indigo gradient and contains the only primary action.
+
+The home screen MUST present, in this order:
+
+1. App identity
+2. PDF import card and primary action
+3. `Extract`, `Chunk`, `Embed`, `Store` pipeline
+4. Active progress or current error
+5. Indexed-document count
+6. Empty state or document rows
+7. Chunk size, overlap, and vector size summary
+
+The saved embeddings screen MUST present, in this order:
+
+1. Back action and document name
+2. Chunk count, dimension count, and local storage summary
+3. Previous and next chunk controls
+4. Complete selected chunk text
+5. Complete selected embedding as indexed float values
+
+The Context Lab MUST show the selected document name, question field, `PREPARE CONTEXT`, the four pipeline steps, and `EXPORT PROMPT` on Model Input. The expanded input MUST show the exact prepared system instructions and user message, including the question and complete source blocks. Export opens Android's share sheet with those strings.
+
+Layout constraints:
+
+- Horizontal padding: 24 dp
+- Vertical padding: 20 dp
+- Major-section spacing: 24 dp
+- Maximum content width: 720 dp, centered when more width is available
+- Hero padding: 24 dp
+- Primary action: full width and 52 dp high
+- PDF names: one line with ellipsis
+- Touch targets: at least 48 dp
+
+The layout MUST remain usable without horizontal scrolling at phone and tablet widths.
+
+## 6. Build and dependency constraints
+
+- Compile SDK: 37
+- Target SDK: 37
+- Minimum SDK: 26
+- Java compatibility: 17
+- APK output: universal
+- Build command: `./gradlew assembleDebug`
+
+Dependencies MUST use stable, fixed versions. The build files are the authority for exact versions.
+
+## 7. Acceptance criteria
+
+| ID | Given | When | Then |
+| --- | --- | --- | --- |
+| AC-1 | The model is at the required asset path | `./gradlew assembleDebug` runs | One universal debug APK is produced |
+| AC-2 | The app process is started | No PDF has been selected | EmbeddingGemma is not loaded |
+| AC-3 | No stored documents exist | The main screen opens | The empty state and enabled `Add a PDF` action are visible |
+| AC-4 | The picker is open | The user cancels | UI state and database contents do not change |
+| AC-5 | A text-based PDF is selected | Import completes | At least one chunk is stored and every stored vector has 768 values |
+| AC-6 | Extracted text exceeds 800 characters | It is chunked | Chunks are ordered, no chunk exceeds 800 characters, and adjacent chunks repeat up to 120 source characters |
+| AC-7 | A PDF has no selectable text | Extraction completes | No rows are written and the OCR message is shown |
+| AC-8 | Any extraction, chunking, or embedding step fails | The error reaches the ViewModel | Existing rows remain unchanged and the action becomes enabled |
+| AC-9 | A document with name N exists | A successful import with name N completes | Exactly one document named N exists and only its new chunks remain |
+| AC-10 | An import succeeds | The app process restarts | The document remains listed with the same chunk count |
+| AC-11 | An import is active | The user views the screen | The action is disabled and the current stage is visible |
+| AC-12 | Phone and tablet widths are used | The screen renders | Section 5 tokens are applied, content has no horizontal scrolling, and width is capped at 720 dp |
+| AC-13 | The repository is inspected | Git status is checked | `embedding_gemma.task` is not tracked |
+| AC-14 | An indexed document exists | Its list item is tapped | Its chunks load in order and the selected chunk shows every stored value without running EmbeddingGemma |
+| AC-15 | The saved embeddings screen is open | Back is pressed | The document list returns without changing stored data |
+| AC-16 | An indexed document exists | A question is submitted | Query embedding runs once and all three rankings are computed from the same saved chunks |
+| AC-17 | A question is entered | `PREPARE CONTEXT` is tapped | Hybrid retrieval and request construction complete in one action; selected chunks, estimated budget use, and omissions appear |
+| AC-18 | A request is prepared | `VIEW MODEL INPUT` is expanded | The exact instructions and question with complete source blocks are visible, with no ranking tabs or scores |
+| AC-19 | Context preparation is running | The user leaves the screen | The request is cancelled and cannot write results into the next screen |
+| AC-20 | The search engine unit tests run | An exact term and a paraphrase are compared | BM25 can rescue an exact term, while a paraphrase retains a semantic result |
+
+## 8. Change rules
+
+1. A requested behavior change MUST update this specification before or with the implementation.
+2. A schema change MUST define its Room migration before implementation.
+3. A change to chunking, EmbeddingGemma, or vector encoding MUST update its contract and acceptance criteria.
+
+## 9. Episode 5 search contract
+
+- The database name, schema version, and application ID remain the same so the Episode 4 indexed PDFs can be reused after installing this project as an update.
+- The search scope is the selected document. `getChunks(documentId)` already provides ordered saved text and 768D vectors.
+- Semantic ranks use cosine similarity. BM25 tokenizes Unicode letters and numbers, lowercases with `Locale.ROOT`, and uses `k1 = 1.2` and `b = 0.75`. Terms absent from a chunk receive no BM25 hit.
+- Hybrid uses reciprocal rank fusion on the complete semantic and matching BM25 rankings. Each rank contributes `1 / (60 + rank)`. Raw BM25 and cosine scores MUST NOT be added.
+- Ties resolve by original chunk index. The complete Hybrid ranking is passed to the context builder; rankings are not displayed in Episode 6's main flow.
+- The application needs the same `embedding_gemma.task` asset as Episode 4. It MUST NOT download a model or PDF at runtime.
+
+## 10. Episode 6 context and prompt export contract
+
+- Preserve the Episode 5 database, chunking, embedding, and all three ranking calculations. Prompt preparation MUST use the complete Hybrid list for the selected PDF. No document extraction or embedding runs during prompt preparation.
+- The pure context builder MUST use stable per-request source IDs, the document name, original chunk number, and unchanged chunk text. It MUST include distinct chunks once in retrieval order, select complete blocks, record omissions, and refuse to substitute weaker blocks when the strongest block alone does not fit.
+- System instructions MUST be separate from evidence. They require evidence-only answers, preservation of names, values, units, and relevant dates, acknowledgement of insufficient evidence, and treatment of document text as data. Source IDs are inspectable references, not verified citations; page numbers are unavailable.
+- `RequestBudget` MUST include instructions, question, labels, evidence, chat formatting, safety margin, and reserved output. Counts MUST be visibly marked estimated. Defaults are provisional and do not assert a model limit.
+- The Question page MUST summarize the already indexed PDF and offer `PREPARE CONTEXT`. On success the pager moves to Retrieve. Retrieve MUST show actual hybrid candidates in order, with complete text and available ranks expandable. Build Context MUST distinguish selected complete blocks from omitted candidates and expand their reasons. Model Input MUST show the exact separate system instruction string and the question/evidence user-message pieces. Estimates, output reserve, and safety margin MUST be explicit. Changing the question or document MUST clear prepared context.
+- The primary action area MUST stay below the pager and above the navigation/keyboard insets. Only Model Input offers `EXPORT PROMPT`, which opens an Android text share intent with the prepared system instructions and complete user message. This episode does not import an answer model or generate an answer. No chat list or dashboard is added.
+- Unit tests MUST cover complete blocks, duplicate IDs, budget boundaries, oversized first source, empty candidates, unchanged names/values/units, and question invalidation. Existing retrieval tests and Android build MUST pass.
